@@ -1,0 +1,142 @@
+---
+title: "SRSM 2024 Presentation Example"
+author: "Jihyun Lee, Ph.D."
+date: "2024-06-10"
+output: 
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    code_folding: show
+---
+
+```{r message = F}
+library(dplyr)
+library(lavaan)
+library(metaSEM)
+library(clubSandwich)
+library(metafor)
+```
+
+```{r}
+data_sub <- readRDS("data_sub.rds")
+```
+
+# Stage 1. Pooling matrices
+
+```{r}
+# constant sampling correlation working model
+V_mat <- impute_covariance_matrix(data_sub$vr, 
+                                   cluster = data_sub$StudyID, 
+                                   r = .8, 
+                                   smooth_vi = TRUE)
+
+# Fit a model
+model_pool <- rma.mv(r ~ -1 + pairing,
+                     V = V_mat, 
+                     random = ~ 1 | StudyID / EffectSizeID,
+                     data = data_sub)
+
+
+# RVE: pooling correlation
+coef_pool <- coef_test(model_pool, vcov = "CR2")
+
+### Create pooled correlation matrix
+coef_r <- with(coef_pool, c(beta[1], beta[2], beta[3]))
+
+# correlation matrix format
+r_mat <- vec2symMat(coef_r, diag=FALSE)
+
+corlable <- c("Spatial", "Fluid", "Verbal")
+
+Rcorr <- matrix(r_mat, ncol=3, nrow=3,
+                    dimnames=list(corlable, corlable))
+Rcorr
+
+# Checking for NPD
+is.pd(Rcorr) # TRUE
+
+# Cluster-Robust Variance-Covariance Matrix
+vcov <- vcovCR(model_pool, 
+                    type = "CR2", 
+                    cluster = data_sub$StudyID) # using clubSandwich package 3 by 3
+
+```
+
+Total sample size information for Stage 2 in TSSEM
+```{r}
+# get the mean sample size by StudyID
+samplesize <- data_sub %>% group_by(StudyID) %>% summarise(avgN = mean(samplesize), count = n()) %>%
+  ungroup()
+
+# total sample size (sum across all studies)
+totalss <- sum(samplesize$avgN)
+```
+
+# Stage 2. SEM 
+
+## Modeling
+```{r}
+model <- "Fluid ~ a*Spatial
+          Verbal ~ b*Spatial
+          
+          # Covariance
+          Fluid ~~ Verbal
+           
+          # fix variance of the independent variable
+          Spatial ~~ 1*Spatial
+"
+
+# RAM
+
+RAM <- lavaan2RAM(model, obs.variables = c("Spatial", "Verbal", "Fluid"))
+
+```
+
+### Fit a model with comparing paths
+
+```{r}
+path_fit <- wls(Cov=Rcorr, aCov=vcov, n=totalss, 
+                RAM = RAM,
+                diag.constraints = TRUE, intervals.type = "LB",
+                mx.algebras = list(diff = mxAlgebra(a-b, name ="diff")))
+
+
+summary(path_fit)
+```
+
+## Constraining model
+
+```{r}
+model_c <- "Fluid ~ a*Spatial
+          Verbal ~ a*Spatial # path a
+          
+          Fluid ~~ Verbal
+           
+          # fix variance of the independent variable
+          Spatial ~~ 1*Spatial
+"
+
+
+RAM_c <- lavaan2RAM(model_c, obs.variables = c("Spatial", "Verbal", "Fluid"))
+
+
+
+# -- Fit a model
+path_fit_c <- wls(Cov=Rcorr, aCov=vcov, n=totalss, 
+                RAM = RAM_c,
+                diag.constraints = TRUE, intervals.type = "LB")
+
+
+summary(path_fit_c)
+```
+
+
+## Compare two models
+
+```{r}
+anova(path_fit, path_fit_c)
+```
+
+
